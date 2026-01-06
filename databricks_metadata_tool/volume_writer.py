@@ -1,6 +1,5 @@
 """Upload collection output files to a Unity Catalog volume."""
 
-import os
 import logging
 from pathlib import Path
 from databricks.sdk import WorkspaceClient
@@ -8,22 +7,23 @@ from databricks.sdk.service.catalog import VolumeType
 
 logger = logging.getLogger('databricks_metadata_tool.volume_writer')
 
-# Default names for collection output
+# Default names for collection output (can be overridden via config.yaml)
 DEFAULT_CATALOG = "collection_catalog"
 DEFAULT_SCHEMA = "collection_schema"
 DEFAULT_VOLUME = "collection_volume"
-STAGING_FOLDER = "staging"
+DEFAULT_STAGING_FOLDER = "staging"
 
 
 class VolumeWriter:
     """Upload CSV files to a Unity Catalog volume."""
     
-    def __init__(self, workspace_url: str, catalog: str = None, schema: str = None, volume: str = None):
+    def __init__(self, workspace_url: str, catalog: str = None, schema: str = None, 
+                 volume: str = None, staging_folder: str = None):
         self.workspace_url = workspace_url
         self.catalog = catalog or DEFAULT_CATALOG
         self.schema = schema or DEFAULT_SCHEMA
         self.volume_name = volume or DEFAULT_VOLUME
-        self.staging_folder = STAGING_FOLDER
+        self.staging_folder = staging_folder or DEFAULT_STAGING_FOLDER
         
         self.client = WorkspaceClient(host=workspace_url)
     

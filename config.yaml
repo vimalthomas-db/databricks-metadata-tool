@@ -46,6 +46,13 @@ output:
   directory: "./outputs"  # All outputs are CSV files
   timestamp: true
 
+# Volume Output (when --write-to-volume is used)
+volume:
+  catalog: "collection_catalog"
+  schema: "collection_schema"
+  volume: "collection_volume"
+  staging_folder: "staging"
+
 # Delta Table Output (optional)
 # Write results to Delta tables in addition to CSV/JSON
 delta_output:

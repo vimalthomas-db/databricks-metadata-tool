@@ -35,9 +35,9 @@ Examples:
     parser.add_argument('--config', type=str, default='config.yaml', help='Config file path')
     parser.add_argument('--output-dir', type=str, default='./outputs', help='Output directory')
     parser.add_argument('--write-to-volume', action='store_true', help='Upload to Unity Catalog volume')
-    parser.add_argument('--volume-catalog', type=str, default='collection_catalog', help='Volume catalog')
-    parser.add_argument('--volume-schema', type=str, default='collection_schema', help='Volume schema')
-    parser.add_argument('--volume-name', type=str, default='collection_volume', help='Volume name')
+    parser.add_argument('--volume-catalog', type=str, help='Volume catalog (default from config.yaml)')
+    parser.add_argument('--volume-schema', type=str, help='Volume schema (default from config.yaml)')
+    parser.add_argument('--volume-name', type=str, help='Volume name (default from config.yaml)')
     parser.add_argument('--cluster-id', type=str, help='Cluster ID for Spark jobs')
     parser.add_argument('--size-threshold', type=int, default=200, help='Table count threshold for Spark')
     parser.add_argument('--size-workers', type=int, default=20, help='Parallel workers for size collection')
@@ -93,13 +93,21 @@ Examples:
         if args.write_to_volume and args.admin_workspace and not config.get('dry_run', False):
             from databricks_metadata_tool.volume_writer import VolumeWriter
             
+            # Get volume settings from config, CLI args override
+            volume_config = config.get('volume', {})
+            vol_catalog = args.volume_catalog or volume_config.get('catalog', 'collection_catalog')
+            vol_schema = args.volume_schema or volume_config.get('schema', 'collection_schema')
+            vol_name = args.volume_name or volume_config.get('volume', 'collection_volume')
+            vol_staging = volume_config.get('staging_folder', 'staging')
+            
             logger.info("Uploading to Unity Catalog volume...")
             
             volume_writer = VolumeWriter(
                 workspace_url=args.admin_workspace,
-                catalog=args.volume_catalog,
-                schema=args.volume_schema,
-                volume=args.volume_name
+                catalog=vol_catalog,
+                schema=vol_schema,
+                volume=vol_name,
+                staging_folder=vol_staging
             )
             
             upload_result = volume_writer.upload_files(args.output_dir)
