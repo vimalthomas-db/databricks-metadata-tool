@@ -20,14 +20,15 @@ def main():
 Examples:
   dbmeta --scan                    # Scan account for workspaces
   dbmeta --collect --admin-workspace <url> --warehouse-id <id>
-  dbmeta --collect-dryrun --admin-workspace <url> --warehouse-id <id>
+  dbmeta --collect-dryrun --admin-workspace <url> --warehouse-id <id>  # Show tier selection, no files
 '''
     )
     
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument('--scan', action='store_true', help='Scan account for workspaces and metastores')
     mode_group.add_argument('--collect', action='store_true', help='Full collection with table sizes')
-    mode_group.add_argument('--collect-dryrun', action='store_true', dest='collect_dryrun', help='Collection without size queries')
+    mode_group.add_argument('--collect-dryrun', action='store_true', dest='collect_dryrun', 
+                           help='Dry run: show tier selection without collecting sizes or saving files')
     
     parser.add_argument('--admin-workspace', type=str, help='Admin workspace URL')
     parser.add_argument('--warehouse-id', type=str, help='SQL Warehouse ID')
@@ -65,7 +66,7 @@ Examples:
         config['execution_mode'] = 'collect'
     elif args.collect_dryrun:
         config['execution_mode'] = 'collect_dryrun'
-        config['dry_run_sizes'] = True
+        config['dry_run'] = True  # Full dry run: no sizes, no files
     else:
         config['execution_mode'] = 'scan'
     
@@ -85,11 +86,11 @@ Examples:
                 size_workers=args.size_workers,
                 cluster_id=args.cluster_id,
                 size_threshold=args.size_threshold,
-                dry_run_sizes=config.get('dry_run_sizes', False)
+                dry_run=config.get('dry_run', False)
             )
         
-        # Upload to volume if requested
-        if args.write_to_volume and args.admin_workspace:
+        # Upload to volume if requested (skip in dry-run mode)
+        if args.write_to_volume and args.admin_workspace and not config.get('dry_run', False):
             from databricks_metadata_tool.volume_writer import VolumeWriter
             
             logger.info("Uploading to Unity Catalog volume...")
@@ -103,6 +104,8 @@ Examples:
             
             upload_result = volume_writer.upload_files(args.output_dir)
             logger.info(f"Files uploaded to: {upload_result['volume_path']}")
+        elif args.write_to_volume and config.get('dry_run', False):
+            logger.info("[DRY RUN] Volume upload skipped")
         
         if result.errors:
             logger.warning(f"Completed with {len(result.errors)} error(s)")

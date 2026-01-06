@@ -507,7 +507,7 @@ class MetadataOrchestrator:
     
     def collect_from_admin(self, admin_workspace: str, warehouse_id: str, 
                           size_workers: int = 20, cluster_id: str = None,
-                          size_threshold: int = 200, dry_run_sizes: bool = False) -> CollectionResult:
+                          size_threshold: int = 200, dry_run: bool = False) -> CollectionResult:
         """
         Phase 2: Collect detailed metadata using specified admin workspace.
         
@@ -521,10 +521,13 @@ class MetadataOrchestrator:
             size_workers: Number of parallel workers for size collection
             cluster_id: Cluster ID for Spark job fallback (optional)
             size_threshold: Table count threshold for Spark job (default: 200)
-            dry_run_sizes: If True, show tier selection without collecting sizes
+            dry_run: If True, show tier selection without collecting sizes or saving files
         """
         logger.info("=" * 80)
-        logger.info("COLLECT: Full Metadata Collection")
+        if dry_run:
+            logger.info("COLLECT: Metadata Collection [DRY RUN - no files will be saved]")
+        else:
+            logger.info("COLLECT: Full Metadata Collection")
         logger.info("=" * 80)
         
         collection_timestamp = datetime.now().isoformat()
@@ -534,7 +537,10 @@ class MetadataOrchestrator:
         # save_results=False: don't save here, we'll save manually with skip_workspaces=True
         scan_result = self.scan_workspaces(discovery_mode='account', save_results=False)
         # Save scan results but skip account_workspaces - workspaces merged into collect_workspaces
-        self._save_scan_results(scan_result, skip_workspaces=True)
+        if not dry_run:
+            self._save_scan_results(scan_result, skip_workspaces=True)
+        else:
+            logger.info("[DRY RUN] Scan file saving skipped")
         
         logger.info("-" * 80)
         logger.info("Step 2: Metastore-level collection...")
@@ -670,7 +676,7 @@ class MetadataOrchestrator:
                     schema.region = admin_ws.location
                     schema.collected_at = collection_timestamp
                 
-                if schemas:
+                if schemas and not dry_run:
                     schema_dicts = [s.to_dict() for s in schemas]
                     schema_file = export_catalog_schemas_csv(
                         schemas=schema_dicts,
@@ -681,6 +687,8 @@ class MetadataOrchestrator:
                     )
                     catalog_schema_files.append(schema_file)
                     total_schemas_saved += len(schemas)
+                elif schemas and dry_run:
+                    logger.info(f"    [DRY RUN] {len(schemas)} schemas - not saved")
                 
                 if self.collection_config.get('collect_tables', True):
                     collect_sizes = self.collection_config.get('collect_sizes', True)
@@ -690,13 +698,13 @@ class MetadataOrchestrator:
                         warehouse_id=wh_id,
                         cluster_id=cluster_id if collect_sizes else None,
                         size_threshold=size_threshold,
-                        dry_run_sizes=dry_run_sizes
+                        dry_run_sizes=dry_run  # Pass dry_run for tier logging
                     )
                     for table in tables:
                         table.region = admin_ws.location
                         table.collected_at = collection_timestamp
                     
-                    if tables:
+                    if tables and not dry_run:
                         table_dicts = [t.to_dict() for t in tables]
                         file_path = export_catalog_tables_csv(
                             tables=table_dicts,
@@ -707,6 +715,8 @@ class MetadataOrchestrator:
                         )
                         catalog_table_files.append(file_path)
                         total_tables_saved += len(tables)
+                    elif tables and dry_run:
+                        logger.info(f"    [DRY RUN] {len(tables)} tables - not saved")
                 
                 if self.collection_config.get('collect_volumes', True):
                     volumes = catalog_collector.list_all_volumes()
@@ -714,7 +724,7 @@ class MetadataOrchestrator:
                         volume.region = admin_ws.location
                         volume.collected_at = collection_timestamp
                     
-                    if volumes:
+                    if volumes and not dry_run:
                         volume_dicts = [v.to_dict() for v in volumes]
                         volume_file = export_catalog_volumes_csv(
                             volumes=volume_dicts,
@@ -725,11 +735,16 @@ class MetadataOrchestrator:
                         )
                         catalog_volume_files.append(volume_file)
                         total_volumes_saved += len(volumes)
+                    elif volumes and dry_run:
+                        logger.info(f"    [DRY RUN] {len(volumes)} volumes - not saved")
                 
                 self.result.catalogs.append(catalog)
             
             logger.info("-" * 80)
-            logger.info(f"Saved: {total_schemas_saved} schemas, {total_tables_saved} tables, {total_volumes_saved} volumes")
+            if dry_run:
+                logger.info(f"[DRY RUN] Would save: schemas, tables, volumes (files not created)")
+            else:
+                logger.info(f"Saved: {total_schemas_saved} schemas, {total_tables_saved} tables, {total_volumes_saved} volumes")
             
             self._catalog_table_files = catalog_table_files
             self._catalog_schema_files = catalog_schema_files
@@ -799,11 +814,14 @@ class MetadataOrchestrator:
             # Generate summary
             self._log_summary()
             
-            # Save results
-            self._save_results()
-            
-            # Export CSV
-            self._export_csv()
+            if not dry_run:
+                # Save results
+                self._save_results()
+                
+                # Export CSV
+                self._export_csv()
+            else:
+                logger.info("[DRY RUN] Final CSV export skipped - no files saved")
             
         except Exception as e:
             logger.error(f"Error in collection: {str(e)}", exc_info=True)
