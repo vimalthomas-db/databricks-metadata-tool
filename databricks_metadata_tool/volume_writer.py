@@ -4,7 +4,7 @@ import os
 import logging
 from pathlib import Path
 from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.catalog import VolumeType, SecurableType, PermissionsChange, Privilege
+from databricks.sdk.service.catalog import VolumeType
 
 logger = logging.getLogger('databricks_metadata_tool.volume_writer')
 
@@ -29,7 +29,6 @@ class VolumeWriter:
     
     def ensure_catalog_exists(self):
         """Create catalog if it doesn't exist."""
-        created_new = False
         try:
             self.client.catalogs.get(self.catalog)
             logger.info(f"Catalog exists: {self.catalog}")
@@ -40,15 +39,10 @@ class VolumeWriter:
                 comment="Databricks metadata collection outputs"
             )
             logger.info(f"Catalog created: {self.catalog}")
-            created_new = True
-        
-        if created_new:
-            self._grant_catalog_permissions()
     
     def ensure_schema_exists(self):
         """Create schema if it doesn't exist."""
         schema_full_name = f"{self.catalog}.{self.schema}"
-        created_new = False
         try:
             self.client.schemas.get(schema_full_name)
             logger.info(f"Schema exists: {schema_full_name}")
@@ -60,44 +54,6 @@ class VolumeWriter:
                 comment="Collection output schema"
             )
             logger.info(f"Schema created: {schema_full_name}")
-            created_new = True
-        
-        if created_new:
-            self._grant_schema_permissions(schema_full_name)
-    
-    def _grant_catalog_permissions(self):
-        """Grant USE_CATALOG to account users."""
-        try:
-            self.client.grants.update(
-                securable_type=SecurableType.CATALOG,
-                full_name=self.catalog,
-                changes=[
-                    PermissionsChange(
-                        add=[Privilege.USE_CATALOG],
-                        principal="account users"
-                    )
-                ]
-            )
-            logger.info(f"  Granted USE_CATALOG on {self.catalog} to account users")
-        except Exception as e:
-            logger.warning(f"  Could not grant permissions on catalog: {e}")
-    
-    def _grant_schema_permissions(self, schema_full_name: str):
-        """Grant USE_SCHEMA to account users."""
-        try:
-            self.client.grants.update(
-                securable_type=SecurableType.SCHEMA,
-                full_name=schema_full_name,
-                changes=[
-                    PermissionsChange(
-                        add=[Privilege.USE_SCHEMA],
-                        principal="account users"
-                    )
-                ]
-            )
-            logger.info(f"  Granted USE_SCHEMA on {schema_full_name} to account users")
-        except Exception as e:
-            logger.warning(f"  Could not grant permissions on schema: {e}")
         
     def ensure_volume_exists(self) -> str:
         """Create the full hierarchy: catalog, schema, volume."""
@@ -105,7 +61,6 @@ class VolumeWriter:
         self.ensure_schema_exists()
         
         volume_full_name = f"{self.catalog}.{self.schema}.{self.volume_name}"
-        created_new = False
         
         try:
             self.client.volumes.read(volume_full_name)
@@ -120,30 +75,8 @@ class VolumeWriter:
                 comment="Metadata collection output files"
             )
             logger.info(f"Volume created: {volume_full_name}")
-            created_new = True
-        
-        # Grant READ and WRITE permissions to account users
-        if created_new:
-            self._grant_volume_permissions(volume_full_name)
         
         return volume_full_name
-    
-    def _grant_volume_permissions(self, volume_full_name: str):
-        """Grant READ_VOLUME and WRITE_VOLUME to account users."""
-        try:
-            self.client.grants.update(
-                securable_type=SecurableType.VOLUME,
-                full_name=volume_full_name,
-                changes=[
-                    PermissionsChange(
-                        add=[Privilege.READ_VOLUME, Privilege.WRITE_VOLUME],
-                        principal="account users"
-                    )
-                ]
-            )
-            logger.info(f"  Granted READ_VOLUME, WRITE_VOLUME on {volume_full_name} to account users")
-        except Exception as e:
-            logger.warning(f"  Could not grant permissions on volume: {e}")
     
     def upload_files(self, output_dir: str, timestamp: str = None) -> dict:
         """Upload all CSV files from output_dir to the volume."""
