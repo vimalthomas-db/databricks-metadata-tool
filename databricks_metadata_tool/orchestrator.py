@@ -523,11 +523,12 @@ class MetadataOrchestrator:
             size_threshold: Table count threshold for Spark job (default: 200)
             dry_run: If True, show tier selection without collecting sizes or saving files
         """
-        logger.info("=" * 80)
+        # DRY RUN: Minimal output - only tier calculations
         if dry_run:
-            logger.info("COLLECT: Metadata Collection [DRY RUN - no files will be saved]")
-        else:
-            logger.info("COLLECT: Full Metadata Collection")
+            return self._dry_run_tier_analysis(admin_workspace, warehouse_id, cluster_id, size_threshold)
+        
+        logger.info("=" * 80)
+        logger.info("COLLECT: Full Metadata Collection")
         logger.info("=" * 80)
         
         collection_timestamp = datetime.now().isoformat()
@@ -537,10 +538,7 @@ class MetadataOrchestrator:
         # save_results=False: don't save here, we'll save manually with skip_workspaces=True
         scan_result = self.scan_workspaces(discovery_mode='account', save_results=False)
         # Save scan results but skip account_workspaces - workspaces merged into collect_workspaces
-        if not dry_run:
-            self._save_scan_results(scan_result, skip_workspaces=True)
-        else:
-            logger.info("[DRY RUN] Scan file saving skipped")
+        self._save_scan_results(scan_result, skip_workspaces=True)
         
         logger.info("-" * 80)
         logger.info("Step 2: Metastore-level collection...")
@@ -676,7 +674,7 @@ class MetadataOrchestrator:
                     schema.region = admin_ws.location
                     schema.collected_at = collection_timestamp
                 
-                if schemas and not dry_run:
+                if schemas:
                     schema_dicts = [s.to_dict() for s in schemas]
                     schema_file = export_catalog_schemas_csv(
                         schemas=schema_dicts,
@@ -687,8 +685,6 @@ class MetadataOrchestrator:
                     )
                     catalog_schema_files.append(schema_file)
                     total_schemas_saved += len(schemas)
-                elif schemas and dry_run:
-                    logger.info(f"    [DRY RUN] {len(schemas)} schemas - not saved")
                 
                 if self.collection_config.get('collect_tables', True):
                     collect_sizes = self.collection_config.get('collect_sizes', True)
@@ -698,13 +694,13 @@ class MetadataOrchestrator:
                         warehouse_id=wh_id,
                         cluster_id=cluster_id if collect_sizes else None,
                         size_threshold=size_threshold,
-                        dry_run_sizes=dry_run  # Pass dry_run for tier logging
+                        dry_run_sizes=False
                     )
                     for table in tables:
                         table.region = admin_ws.location
                         table.collected_at = collection_timestamp
                     
-                    if tables and not dry_run:
+                    if tables:
                         table_dicts = [t.to_dict() for t in tables]
                         file_path = export_catalog_tables_csv(
                             tables=table_dicts,
@@ -715,8 +711,6 @@ class MetadataOrchestrator:
                         )
                         catalog_table_files.append(file_path)
                         total_tables_saved += len(tables)
-                    elif tables and dry_run:
-                        logger.info(f"    [DRY RUN] {len(tables)} tables - not saved")
                 
                 if self.collection_config.get('collect_volumes', True):
                     volumes = catalog_collector.list_all_volumes()
@@ -724,7 +718,7 @@ class MetadataOrchestrator:
                         volume.region = admin_ws.location
                         volume.collected_at = collection_timestamp
                     
-                    if volumes and not dry_run:
+                    if volumes:
                         volume_dicts = [v.to_dict() for v in volumes]
                         volume_file = export_catalog_volumes_csv(
                             volumes=volume_dicts,
@@ -735,16 +729,11 @@ class MetadataOrchestrator:
                         )
                         catalog_volume_files.append(volume_file)
                         total_volumes_saved += len(volumes)
-                    elif volumes and dry_run:
-                        logger.info(f"    [DRY RUN] {len(volumes)} volumes - not saved")
                 
                 self.result.catalogs.append(catalog)
             
             logger.info("-" * 80)
-            if dry_run:
-                logger.info(f"[DRY RUN] Would save: schemas, tables, volumes (files not created)")
-            else:
-                logger.info(f"Saved: {total_schemas_saved} schemas, {total_tables_saved} tables, {total_volumes_saved} volumes")
+            logger.info(f"Saved: {total_schemas_saved} schemas, {total_tables_saved} tables, {total_volumes_saved} volumes")
             
             self._catalog_table_files = catalog_table_files
             self._catalog_schema_files = catalog_schema_files
@@ -814,14 +803,11 @@ class MetadataOrchestrator:
             # Generate summary
             self._log_summary()
             
-            if not dry_run:
-                # Save results
-                self._save_results()
-                
-                # Export CSV
-                self._export_csv()
-            else:
-                logger.info("[DRY RUN] Final CSV export skipped - no files saved")
+            # Save results
+            self._save_results()
+            
+            # Export CSV
+            self._export_csv()
             
         except Exception as e:
             logger.error(f"Error in collection: {str(e)}", exc_info=True)
@@ -836,6 +822,128 @@ class MetadataOrchestrator:
         logger.info("=" * 80)
         
         return self.result
+    
+    def _dry_run_tier_analysis(self, admin_workspace: str, warehouse_id: str, 
+                               cluster_id: str = None, size_threshold: int = 200) -> CollectionResult:
+        """
+        Dry run: Only show tier selection logic per catalog.
+        Minimal output - no file saving, no full collection.
+        """
+        print("=" * 70)
+        print("DRY RUN: Tier Selection Analysis")
+        print("=" * 70)
+        print(f"Admin Workspace: {admin_workspace}")
+        print(f"Warehouse ID: {warehouse_id}")
+        print(f"Cluster ID: {cluster_id or 'None (Tier 3 not available)'}")
+        print(f"Size Threshold: {size_threshold} tables")
+        print("=" * 70)
+        
+        try:
+            # Find admin workspace (minimal logging)
+            admin_ws_list = self._discover_workspaces_quiet(admin_workspace)
+            if not admin_ws_list:
+                print(f"ERROR: Admin workspace '{admin_workspace}' not found")
+                return self.result
+            
+            admin_ws = admin_ws_list[0]
+            workspace_collector = WorkspaceCollector(admin_ws)
+            
+            print(f"Metastore: {workspace_collector.metastore_name}")
+            print("-" * 70)
+            
+            # Get catalogs
+            exclude_catalogs = self.azure_config.get('exclude_catalogs', [])
+            catalogs = workspace_collector.list_catalogs()
+            
+            print(f"\nAnalyzing {len(catalogs)} catalog(s)...\n")
+            print(f"{'CATALOG':<30} {'TABLES':<10} {'TIER':<20} {'REASON'}")
+            print("-" * 70)
+            
+            for catalog in catalogs:
+                if catalog.catalog_name in exclude_catalogs:
+                    continue
+                if catalog.is_legacy_hms:
+                    continue
+                
+                # Count tables in this catalog
+                catalog_collector = CatalogCollector(
+                    catalog=catalog,
+                    client=workspace_collector.client,
+                    workspace_url=admin_ws.workspace_url,
+                    exclude_schemas=self.azure_config.get('exclude_schemas', [])
+                )
+                
+                # Get schemas and count tables
+                schemas = catalog_collector.list_schemas()
+                table_count = 0
+                for schema in schemas:
+                    try:
+                        tables = list(workspace_collector.client.tables.list(
+                            catalog_name=catalog.catalog_name,
+                            schema_name=schema.schema_name
+                        ))
+                        table_count += len(tables)
+                    except:
+                        pass
+                
+                # Determine tier
+                if catalog.catalog_name in ['system', 'samples']:
+                    tier = "SKIP"
+                    reason = "System catalog"
+                elif table_count == 0:
+                    tier = "SKIP"
+                    reason = "No tables"
+                elif table_count < size_threshold:
+                    tier = "Tier 2 (SQL WH)"
+                    reason = f"< {size_threshold} tables"
+                elif cluster_id:
+                    tier = "Tier 3 (Spark)"
+                    reason = f">= {size_threshold} tables + cluster"
+                else:
+                    tier = "Tier 2 (fallback)"
+                    reason = f">= {size_threshold} but no cluster"
+                
+                print(f"{catalog.catalog_name:<30} {table_count:<10} {tier:<20} {reason}")
+            
+            print("-" * 70)
+            print("\nTier Legend:")
+            print("  Tier 1: system.information_schema (bulk query, fastest)")
+            print("  Tier 2: SQL Warehouse parallel DESCRIBE DETAIL")
+            print("  Tier 3: Spark cluster parallel collection")
+            print("\nNote: Tier 1 is always attempted first. Tier 2/3 are fallbacks.")
+            print("=" * 70)
+            
+        except Exception as e:
+            print(f"ERROR: {str(e)}")
+        
+        return self.result
+    
+    def _discover_workspaces_quiet(self, target_workspace: str) -> List[Workspace]:
+        """Discover workspace without verbose logging (for dry-run)."""
+        if not self.account_provider:
+            return []
+        
+        try:
+            account_workspaces = self.account_provider.list_workspaces()
+            
+            for ws_data in account_workspaces:
+                ws_name = ws_data['workspace_name']
+                ws_url = ws_data.get('workspace_url', '').rstrip('/')
+                target_clean = target_workspace.rstrip('/')
+                
+                if ws_name == target_workspace or ws_url == target_clean:
+                    workspace = Workspace(
+                        workspace_id=str(ws_data.get('workspace_id', '')),
+                        workspace_name=ws_data['workspace_name'],
+                        workspace_url=ws_data.get('workspace_url', ''),
+                        cloud=ws_data.get('cloud', 'unknown'),
+                        location=ws_data.get('cloud_region') or ws_data.get('region', '')
+                    )
+                    return [workspace]
+            
+            return []
+        except:
+            return []
     
     def _discover_workspaces(self, target_workspace: str = None) -> List[Workspace]:
         """
