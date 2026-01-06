@@ -1,0 +1,6 @@
+# Copy this to terraform.tfvars and fill in your values
+
+subscription_id = "your-azure-subscription-id"
+location        = "eastus2"
+prefix          = "dbmeta-test"
+

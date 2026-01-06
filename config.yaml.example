@@ -1,0 +1,81 @@
+# ============================================================================
+# Databricks Metadata Tool Configuration
+# ============================================================================
+# Copy this file to config.yaml and customize
+#
+# Authentication is handled via environment variables (.env file):
+#   Option 1 (Recommended): OAuth M2M
+#     DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
+#   Option 2: Azure Service Principal
+#     AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_CLIENT_SECRET
+# ============================================================================
+
+# Databricks Account Configuration
+databricks:
+  account_id: null  # Set via DATABRICKS_ACCOUNT_ID env var
+  
+  # Cloud provider (determines Account API host)
+  # Options: azure, aws, gcp
+  cloud: azure
+  
+  # Account API host (auto-set based on cloud, override if needed)
+  # Azure: https://accounts.azuredatabricks.net
+  # AWS:   https://accounts.cloud.databricks.com
+  # GCP:   https://accounts.gcp.databricks.com
+  account_host: null
+
+# Azure-specific settings (optional - for enrichment only)
+# Credentials should be in .env, not here
+azure:
+  subscription_id: null  # Set via AZURE_SUBSCRIPTION_ID env var
+  resource_group: null   # Filter to specific resource group
+  workspace_filter: null # Filter to specific workspace name
+  
+  # Exclusions
+  exclude_workspaces: []
+  exclude_catalogs: ['system', 'samples']
+  exclude_schemas: ['information_schema']
+
+# Discovery Mode
+# - 'account': Databricks Account API (recommended, multi-cloud)
+# - 'azure': Azure Management API (legacy, Azure only)
+discovery_mode: account
+
+# Output Configuration
+output:
+  directory: "./outputs"  # All outputs are CSV files
+  timestamp: true
+
+# Delta Table Output (optional)
+# Write results to Delta tables in addition to CSV
+delta_output:
+  enabled: false
+  workspace_url: null   # e.g., https://adb-xxx.azuredatabricks.net
+  catalog: "metadata_collection"
+  schema: "discovery"
+  warehouse_id: null    # SQL warehouse ID for writes
+
+# Collection Settings
+collection:
+  max_workers: 5        # Parallel workers for workspace collection
+  
+  # What to collect
+  collect_tables: true
+  collect_views: true
+  collect_volumes: true
+  collect_sizes: true   # Collect table sizes (requires warehouse_id)
+  
+  # Size collection settings
+  warehouse_id: null    # SQL warehouse ID for DESCRIBE DETAIL queries
+  size_workers: 20      # Parallel workers for size collection
+  size_threshold: 200   # Table count threshold for Spark job fallback
+  
+  # Detail settings
+  include_table_properties: true
+  include_column_details: false
+  include_storage_location: true
+
+# Logging
+logging:
+  level: "INFO"         # DEBUG, INFO, WARNING, ERROR
+  file: null            # Optional: ./logs/collection.log

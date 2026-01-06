@@ -1,0 +1,16 @@
+# Python Version: 3.8 - 3.12 (3.13+ not yet supported)
+
+# Azure SDKs
+azure-identity==1.15.0
+azure-mgmt-databricks==2.0.0
+azure-mgmt-resource==23.0.1
+azure-mgmt-storage==21.1.0
+
+# Databricks SDK
+databricks-sdk==0.18.0
+
+# Utilities
+pyyaml==6.0.1
+python-dotenv==1.0.0
+requests==2.31.0
+tabulate==0.9.0
