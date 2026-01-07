@@ -24,23 +24,28 @@ Examples:
 '''
     )
     
+    # Mode selection (mutually exclusive)
     mode_group = parser.add_mutually_exclusive_group()
-    mode_group.add_argument('--scan', action='store_true', help='Scan account for workspaces and metastores')
-    mode_group.add_argument('--collect', action='store_true', help='Full collection with table sizes')
+    mode_group.add_argument('--scan', action='store_true', 
+                           help='Scan account for workspaces and metastores')
+    mode_group.add_argument('--collect', action='store_true', 
+                           help='Full collection with table sizes')
     mode_group.add_argument('--collect-dryrun', action='store_true', dest='collect_dryrun', 
-                           help='Dry run: show tier selection without collecting sizes or saving files')
+                           help='Dry run: show tier selection without collecting sizes')
     
-    parser.add_argument('--admin-workspace', type=str, help='Admin workspace URL')
-    parser.add_argument('--warehouse-id', type=str, help='SQL Warehouse ID')
+    # Essential arguments
+    parser.add_argument('--admin-workspace', type=str, help='Admin workspace URL (required for collect)')
+    parser.add_argument('--warehouse-id', type=str, help='SQL Warehouse ID (required for collect)')
+    parser.add_argument('--cluster-id', type=str, help='Cluster ID for Spark jobs (large catalogs)')
+    parser.add_argument('--only-catalogs', type=str, nargs='+', dest='only_catalogs',
+                       help='Only collect tables from these catalogs')
+    
+    # Output options
+    parser.add_argument('--output-dir', type=str, help='Output directory (default: from config)')
+    parser.add_argument('--write-to-volume', action='store_true', help='Upload results to Unity Catalog volume')
+    
+    # Config file
     parser.add_argument('--config', type=str, default='config.yaml', help='Config file path')
-    parser.add_argument('--output-dir', type=str, default='./outputs', help='Output directory')
-    parser.add_argument('--write-to-volume', action='store_true', help='Upload to Unity Catalog volume')
-    parser.add_argument('--volume-catalog', type=str, help='Volume catalog (default from config.yaml)')
-    parser.add_argument('--volume-schema', type=str, help='Volume schema (default from config.yaml)')
-    parser.add_argument('--volume-name', type=str, help='Volume name (default from config.yaml)')
-    parser.add_argument('--cluster-id', type=str, help='Cluster ID for Spark jobs')
-    parser.add_argument('--size-threshold', type=int, default=200, help='Table count threshold for Spark')
-    parser.add_argument('--size-workers', type=int, default=20, help='Parallel workers for size collection')
     
     args = parser.parse_args()
     
@@ -53,11 +58,18 @@ Examples:
         config = {
             'databricks': {'account_id': os.getenv('DATABRICKS_ACCOUNT_ID')},
             'collection': {},
-            'output': {'directory': args.output_dir}
+            'output': {'directory': './outputs'}
         }
     
-    # Override config with CLI args
-    config['output']['directory'] = args.output_dir
+    # Ensure sections exist
+    if 'collection' not in config:
+        config['collection'] = {}
+    if 'output' not in config:
+        config['output'] = {}
+    
+    # CLI overrides config
+    if args.output_dir:
+        config['output']['directory'] = args.output_dir
     
     # Determine mode
     if args.scan:
@@ -80,37 +92,38 @@ Examples:
                 logger.error("--admin-workspace and --warehouse-id required for collect")
                 sys.exit(1)
             
+            # Get collection settings from config
+            collection_cfg = config.get('collection', {})
+            
             result = orchestrator.collect_from_admin(
                 args.admin_workspace,
                 args.warehouse_id,
-                size_workers=args.size_workers,
+                size_workers=collection_cfg.get('size_workers', 20),
                 cluster_id=args.cluster_id,
-                size_threshold=args.size_threshold,
-                dry_run=config.get('dry_run', False)
+                size_threshold=collection_cfg.get('size_threshold', 200),
+                dry_run=config.get('dry_run', False),
+                only_catalogs=args.only_catalogs or collection_cfg.get('only_catalogs')
             )
         
         # Upload to volume if requested (skip in dry-run mode)
         if args.write_to_volume and args.admin_workspace and not config.get('dry_run', False):
             from databricks_metadata_tool.volume_writer import VolumeWriter
             
-            # Get volume settings from config, CLI args override
+            # Get volume settings from config
             volume_config = config.get('volume', {})
-            vol_catalog = args.volume_catalog or volume_config.get('catalog', 'collection_catalog')
-            vol_schema = args.volume_schema or volume_config.get('schema', 'collection_schema')
-            vol_name = args.volume_name or volume_config.get('volume', 'collection_volume')
-            vol_staging = volume_config.get('staging_folder', 'staging')
+            output_dir = config['output'].get('directory', './outputs')
             
             logger.info("Uploading to Unity Catalog volume...")
             
             volume_writer = VolumeWriter(
                 workspace_url=args.admin_workspace,
-                catalog=vol_catalog,
-                schema=vol_schema,
-                volume=vol_name,
-                staging_folder=vol_staging
+                catalog=volume_config.get('catalog', 'collection_catalog'),
+                schema=volume_config.get('schema', 'collection_schema'),
+                volume=volume_config.get('volume', 'collection_volume'),
+                staging_folder=volume_config.get('staging_folder', 'staging')
             )
             
-            upload_result = volume_writer.upload_files(args.output_dir)
+            upload_result = volume_writer.upload_files(output_dir)
             logger.info(f"Files uploaded to: {upload_result['volume_path']}")
         elif args.write_to_volume and config.get('dry_run', False):
             logger.info("[DRY RUN] Volume upload skipped")

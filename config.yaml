@@ -1,93 +1,65 @@
 # ============================================================================
 # Databricks Metadata Tool Configuration
 # ============================================================================
-# Copy this file to config.yaml and customize
 #
-# Authentication is handled via environment variables (.env file):
-#   Option 1 (Recommended): OAuth M2M
-#     DATABRICKS_CLIENT_ID, DATABRICKS_CLIENT_SECRET
-#   Option 2: Azure Service Principal
-#     AZURE_CLIENT_ID, AZURE_TENANT_ID, AZURE_CLIENT_SECRET
+# Authentication (via environment variables or .env file):
+#   DATABRICKS_ACCOUNT_ID     - Your Databricks Account ID
+#   DATABRICKS_CLIENT_ID      - Service Principal Client ID
+#   DATABRICKS_CLIENT_SECRET  - Service Principal Secret
+#
 # ============================================================================
 
-# Databricks Account Configuration
+# Databricks Account
 databricks:
-  account_id: null  # Set via DATABRICKS_ACCOUNT_ID env var
+  # Account ID (can also be set via DATABRICKS_ACCOUNT_ID env var)
+  account_id: null
   
-  # Cloud provider (determines Account API host)
-  # Options: azure, aws, gcp
+  # Cloud provider: azure, aws, gcp
   cloud: azure
-  
-  # Account API host (auto-set based on cloud, override if needed)
-  # Azure: https://accounts.azuredatabricks.net
-  # AWS:   https://accounts.cloud.databricks.com
-  # GCP:   https://accounts.gcp.databricks.com
-  account_host: null
 
-# Azure-specific settings (optional - for enrichment only)
-# Credentials should be in .env, not here
-azure:
-  subscription_id: null  # Set via AZURE_SUBSCRIPTION_ID env var
-  resource_group: null   # Filter to specific resource group
-  workspace_filter: null # Filter to specific workspace name
-  
-  # Exclusions
-  exclude_workspaces: []
+# ============================================================================
+# Filters
+# ============================================================================
+filters:
+  # Catalogs to exclude from collection
   exclude_catalogs: ['system', 'samples']
+  
+  # Schemas to exclude from collection
   exclude_schemas: ['information_schema']
+  
+  # Only collect tables from these catalogs (null = all catalogs)
+  # Can also use CLI: --only-catalogs catalog1 catalog2
+  only_catalogs: null
 
-# Discovery Mode
-# - 'account': Databricks Account API (recommended, multi-cloud)
-# - 'azure': Azure Management API (legacy, Azure only)
-discovery_mode: account
-
-# Output Configuration
+# ============================================================================
+# Output
+# ============================================================================
 output:
-  directory: "./outputs"  # All outputs are CSV files
-  timestamp: true
+  # Local output directory
+  directory: "./outputs"
 
-# Volume Output (when --write-to-volume is used)
+# Volume upload settings (when using --write-to-volume)
 volume:
   catalog: "collection_catalog"
   schema: "collection_schema"
   volume: "collection_volume"
-  staging_folder: "staging"
 
-# Delta Table Output (optional)
-# Write results to Delta tables in addition to CSV/JSON
-delta_output:
-  enabled: false
-  workspace_url: null   # e.g., https://adb-xxx.azuredatabricks.net
-  catalog: "metadata_collection"
-  schema: "discovery"
-  warehouse_id: null    # SQL warehouse ID for writes
-
+# ============================================================================
 # Collection Settings
+# ============================================================================
 collection:
-  max_workers: 5        # Parallel workers for workspace collection
-  
   # What to collect
   collect_tables: true
-  collect_views: true
   collect_volumes: true
-  collect_sizes: true
+  collect_sizes: true    # Collect table sizes (requires warehouse_id)
   
-  
-  
-  
-     # Collect table sizes (requires warehouse_id)
-  
-  # Size collection settings
-  warehouse_id: null    # SQL warehouse ID for DESCRIBE DETAIL queries
-  size_workers: 20      # Parallel workers for size collection
-  size_threshold: 200   # Table count threshold for Spark job fallback
-  
-  # Detail settings
-  include_table_properties: true
-  include_column_details: false
-  include_storage_location: true
+  # Size collection tuning
+  size_workers: 20       # Parallel workers for SQL queries (Tier 2)
+  size_threshold: 200    # Table count threshold for Spark job (Tier 3)
+  max_parallel_spark_jobs: 3  # Max concurrent Spark jobs
 
+# ============================================================================
 # Logging
+# ============================================================================
 logging:
-  level: "INFO"         # DEBUG, INFO, WARNING, ERROR
-  file: null            # Optional: ./logs/collection.log
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR

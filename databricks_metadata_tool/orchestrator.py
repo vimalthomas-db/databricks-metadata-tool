@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from databricks_metadata_tool.cloud_provider.azure_provider import AzureProvider
 from databricks_metadata_tool.cloud_provider.account_provider import AccountProvider
 from databricks_metadata_tool.collectors.workspace_collector import WorkspaceCollector
-from databricks_metadata_tool.collectors.catalog_collector import CatalogCollector
+from databricks_metadata_tool.collectors.catalog_collector import CatalogCollector, SparkJobManager, escape_full_name
 from databricks_metadata_tool.models import CollectionResult, ScanResult, MetastoreInfo, Workspace, Catalog, Table, Volume, Schema
 from databricks_metadata_tool.utils import format_bytes
 from databricks_metadata_tool.scan_exporter import (
@@ -34,7 +34,8 @@ class MetadataOrchestrator:
     
     def __init__(self, config: Dict[str, Any]):
         self.config = config
-        self.azure_config = config.get('azure', {})
+        self.azure_config = config.get('azure', {})  # Legacy, kept for Azure provider
+        self.filters = config.get('filters', config.get('azure', {}))  # New filters section
         self.databricks_config = config.get('databricks', {})
         self.collection_config = config.get('collection', {})
         self.output_config = config.get('output', {})
@@ -507,7 +508,8 @@ class MetadataOrchestrator:
     
     def collect_from_admin(self, admin_workspace: str, warehouse_id: str, 
                           size_workers: int = 20, cluster_id: str = None,
-                          size_threshold: int = 200, dry_run: bool = False) -> CollectionResult:
+                          size_threshold: int = 200, dry_run: bool = False,
+                          only_catalogs: List[str] = None) -> CollectionResult:
         """
         Phase 2: Collect detailed metadata using specified admin workspace.
         
@@ -522,6 +524,7 @@ class MetadataOrchestrator:
             cluster_id: Cluster ID for Spark job fallback (optional)
             size_threshold: Table count threshold for Spark job (default: 200)
             dry_run: If True, show tier selection without collecting sizes or saving files
+            only_catalogs: If provided, only collect tables from these catalogs (all other metadata collected normally)
         """
         # DRY RUN: Minimal output - only tier calculations
         if dry_run:
@@ -546,6 +549,8 @@ class MetadataOrchestrator:
         logger.info(f"Warehouse ID: {warehouse_id}")
         if cluster_id:
             logger.info(f"Spark cluster: {cluster_id}")
+        if only_catalogs:
+            logger.info(f"Table collection filter: {', '.join(only_catalogs)}")
         
         try:
             # Step 1: Find the admin workspace
@@ -617,7 +622,7 @@ class MetadataOrchestrator:
             logger.info(f"  - External Locations: {len(external_locations)}")
             
             # Catalog bindings (cross-workspace view)
-            exclude_catalogs = self.azure_config.get('exclude_catalogs', [])
+            exclude_catalogs = self.filters.get('exclude_catalogs', [])
             catalogs = workspace_collector.list_catalogs()
             catalogs_to_bind = [c for c in catalogs if c.catalog_name not in exclude_catalogs]
             
@@ -629,12 +634,12 @@ class MetadataOrchestrator:
             self.result.catalog_bindings = bindings
             logger.info(f"  - Catalog Bindings: {len(bindings)}")
             
-            # Collect catalog/schema/table data
+            # Collect catalog/schema/table data with async Spark jobs
             logger.info("-" * 80)
             logger.info("Collecting catalog data...")
             logger.info("-" * 80)
             
-            exclude_schemas = self.azure_config.get('exclude_schemas', [])
+            exclude_schemas = self.filters.get('exclude_schemas', [])
             
             # Generate timestamp for per-catalog files
             output_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -646,6 +651,24 @@ class MetadataOrchestrator:
             total_tables_saved = 0
             total_schemas_saved = 0
             total_volumes_saved = 0
+            
+            # Phase 1: Collect schemas, volumes, and identify catalogs needing Spark jobs
+            collect_sizes = self.collection_config.get('collect_sizes', True)
+            max_parallel_spark_jobs = self.collection_config.get('max_parallel_spark_jobs', 3)
+            
+            # Track catalogs that need Tier 3 (Spark) processing
+            tier3_catalogs = []  # [(catalog, catalog_collector, tables)]
+            
+            # Initialize Spark Job Manager if we have a cluster_id
+            spark_job_manager = None
+            if cluster_id and collect_sizes:
+                spark_job_manager = SparkJobManager(
+                    client=workspace_collector.client,
+                    cluster_id=cluster_id,
+                    max_parallel_jobs=max_parallel_spark_jobs,
+                    poll_interval_seconds=30
+                )
+                logger.info(f"  Spark Job Manager initialized (max parallel: {max_parallel_spark_jobs})")
             
             for catalog in catalogs:
                 catalog.region = admin_ws.location
@@ -669,6 +692,7 @@ class MetadataOrchestrator:
                     size_workers=size_workers
                 )
                 
+                # Collect schemas
                 schemas = catalog_collector.list_schemas()
                 for schema in schemas:
                     schema.region = admin_ws.location
@@ -686,21 +710,38 @@ class MetadataOrchestrator:
                     catalog_schema_files.append(schema_file)
                     total_schemas_saved += len(schemas)
                 
-                if self.collection_config.get('collect_tables', True):
-                    collect_sizes = self.collection_config.get('collect_sizes', True)
+                # Collect tables - use Tier 1/2 for immediate, queue Tier 3 for async
+                # Check if we should collect tables for this catalog (only_catalogs filter)
+                should_collect_tables = self.collection_config.get('collect_tables', True)
+                if only_catalogs and catalog.catalog_name not in only_catalogs:
+                    logger.info(f"    Skipping table collection (--only-catalogs filter)")
+                    should_collect_tables = False
+                
+                if should_collect_tables:
                     wh_id = warehouse_id if collect_sizes else None
                     
+                    # Collect tables (sizes collected via Tier 1/2, Tier 3 queued for async)
                     tables = catalog_collector.list_all_tables(
                         warehouse_id=wh_id,
-                        cluster_id=cluster_id if collect_sizes else None,
+                        cluster_id=None,  # Don't use sync Spark - we'll handle async
                         size_threshold=size_threshold,
-                        dry_run_sizes=False
+                        dry_run_sizes=False,
+                        skip_tier2_fallback=bool(spark_job_manager)  # Skip Tier 2 for large catalogs if Spark available
                     )
+                    
                     for table in tables:
                         table.region = admin_ws.location
                         table.collected_at = collection_timestamp
                     
-                    if tables:
+                    # Check if this catalog needs Tier 3 (Spark) processing
+                    tables_needing_size = [t for t in tables if t.is_delta and t.table_type != 'VIEW' and t.size_bytes is None]
+                    
+                    if len(tables_needing_size) >= size_threshold and spark_job_manager:
+                        # Queue for async Spark job
+                        tier3_catalogs.append((catalog, tables, tables_needing_size))
+                        logger.info(f"    Queued for Spark: {len(tables_needing_size)} tables need sizes")
+                    elif tables:
+                        # Save immediately (Tier 1/2 already collected sizes)
                         table_dicts = [t.to_dict() for t in tables]
                         file_path = export_catalog_tables_csv(
                             tables=table_dicts,
@@ -712,6 +753,7 @@ class MetadataOrchestrator:
                         catalog_table_files.append(file_path)
                         total_tables_saved += len(tables)
                 
+                # Collect volumes
                 if self.collection_config.get('collect_volumes', True):
                     volumes = catalog_collector.list_all_volumes()
                     for volume in volumes:
@@ -731,6 +773,49 @@ class MetadataOrchestrator:
                         total_volumes_saved += len(volumes)
                 
                 self.result.catalogs.append(catalog)
+            
+            # Phase 2: Process Tier 3 catalogs with async Spark jobs
+            if tier3_catalogs and spark_job_manager:
+                logger.info("-" * 80)
+                logger.info(f"Processing {len(tier3_catalogs)} catalog(s) with Spark jobs...")
+                logger.info("-" * 80)
+                
+                # Sort by table count ascending (smaller catalogs first = faster results)
+                tier3_catalogs.sort(key=lambda x: len(x[2]))
+                
+                # Submit jobs up to max_parallel_jobs limit
+                submitted_count = 0
+                for catalog, all_tables, tables_needing_size in tier3_catalogs:
+                    # Wait if we've hit the parallel limit
+                    while spark_job_manager.get_active_job_count() >= max_parallel_spark_jobs:
+                        spark_job_manager.poll_and_collect()
+                        if spark_job_manager.get_active_job_count() >= max_parallel_spark_jobs:
+                            import time
+                            time.sleep(10)
+                    
+                    # Submit the job (may result in multiple chunks for large catalogs)
+                    run_ids = spark_job_manager.submit_job(catalog.catalog_name, tables_needing_size)
+                    submitted_count += len(run_ids) if run_ids else 0
+                
+                logger.info(f"  Submitted {submitted_count} Spark job(s), waiting for completion...")
+                
+                # Wait for all jobs to complete
+                final_status = spark_job_manager.wait_for_all(timeout_minutes=60)
+                logger.info(f"  Spark jobs: {final_status['completed']} completed, {final_status['failed']} failed")
+                
+                # Save tables for Tier 3 catalogs (now with sizes)
+                for catalog, all_tables, tables_needing_size in tier3_catalogs:
+                    if all_tables:
+                        table_dicts = [t.to_dict() for t in all_tables]
+                        file_path = export_catalog_tables_csv(
+                            tables=table_dicts,
+                            catalog_name=catalog.catalog_name,
+                            output_dir=output_dir,
+                            timestamp=output_timestamp,
+                            collection_ts=collection_timestamp
+                        )
+                        catalog_table_files.append(file_path)
+                        total_tables_saved += len(all_tables)
             
             logger.info("-" * 80)
             logger.info(f"Saved: {total_schemas_saved} schemas, {total_tables_saved} tables, {total_volumes_saved} volumes")
@@ -852,7 +937,7 @@ class MetadataOrchestrator:
             print("-" * 70)
             
             # Get catalogs
-            exclude_catalogs = self.azure_config.get('exclude_catalogs', [])
+            exclude_catalogs = self.filters.get('exclude_catalogs', [])
             catalogs = workspace_collector.list_catalogs()
             
             print(f"\nAnalyzing {len(catalogs)} catalog(s)...\n")
@@ -870,7 +955,7 @@ class MetadataOrchestrator:
                     catalog=catalog,
                     client=workspace_collector.client,
                     workspace_url=admin_ws.workspace_url,
-                    exclude_schemas=self.azure_config.get('exclude_schemas', [])
+                    exclude_schemas=self.filters.get('exclude_schemas', [])
                 )
                 
                 # Get schemas and count tables
@@ -1014,7 +1099,7 @@ class MetadataOrchestrator:
                     break
             
             # Apply exclusions
-            exclude_workspaces = self.azure_config.get('exclude_workspaces', [])
+            exclude_workspaces = self.filters.get('exclude_workspaces', [])
             if exclude_workspaces:
                 original_count = len(workspaces)
                 workspaces = [ws for ws in workspaces if ws.workspace_name not in exclude_workspaces]
@@ -1151,7 +1236,7 @@ class MetadataOrchestrator:
             # Collect catalog bindings (which workspaces can access each catalog)
             # Filter out excluded catalogs before checking bindings
             if catalogs:
-                exclude_catalogs = self.azure_config.get('exclude_catalogs', [])
+                exclude_catalogs = self.filters.get('exclude_catalogs', [])
                 catalogs_to_check = [c for c in catalogs if c.catalog_name not in exclude_catalogs]
                 
                 if catalogs_to_check:
@@ -1221,7 +1306,7 @@ class MetadataOrchestrator:
                 logger.info(f"Found {len(catalogs)} catalog(s)")
             
             # Collect catalog-level metadata
-            exclude_catalogs = self.azure_config.get('exclude_catalogs', [])
+            exclude_catalogs = self.filters.get('exclude_catalogs', [])
             for catalog in catalogs:
                 # Check if catalog should be excluded
                 if catalog.catalog_name in exclude_catalogs:
@@ -1249,7 +1334,7 @@ class MetadataOrchestrator:
         
         try:
             # Initialize catalog collector
-            exclude_schemas = self.azure_config.get('exclude_schemas', [])
+            exclude_schemas = self.filters.get('exclude_schemas', [])
             
             catalog_collector = CatalogCollector(
                 catalog, 
