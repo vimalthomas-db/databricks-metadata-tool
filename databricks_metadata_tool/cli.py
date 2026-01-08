@@ -54,11 +54,19 @@ Examples:
     # Load config
     try:
         config = load_config(args.config)
-    except FileNotFoundError:
+    except FileNotFoundError as e:
+        # If user explicitly specified a config file, fail if not found
+        if args.config != 'config.yaml':
+            logger.error(f"Config file not found: {args.config}")
+            sys.exit(1)
+        
+        # Default config.yaml not found - use environment variables
+        logger.warning("No config.yaml found, using environment variables and defaults")
         config = {
             'databricks': {'account_id': os.getenv('DATABRICKS_ACCOUNT_ID')},
             'collection': {},
-            'output': {'directory': './outputs'}
+            'output': {'directory': './outputs'},
+            'filters': {'exclude_catalogs': ['system', 'samples'], 'exclude_schemas': ['information_schema']}
         }
     
     # Ensure sections exist
@@ -82,18 +90,55 @@ Examples:
     else:
         config['execution_mode'] = 'scan'
     
+    # Validate required parameters
+    account_id = config.get('databricks', {}).get('account_id') or os.getenv('DATABRICKS_ACCOUNT_ID')
+    if not account_id:
+        logger.error("DATABRICKS_ACCOUNT_ID not set. Set via environment variable or config.yaml")
+        sys.exit(1)
+    
+    # Validate collect mode parameters
+    if config['execution_mode'] in ['collect', 'collect_dryrun']:
+        if not args.admin_workspace:
+            logger.error("--admin-workspace required for collect mode")
+            logger.error("  Example: --admin-workspace https://adb-123.azuredatabricks.net")
+            sys.exit(1)
+        
+        if not args.warehouse_id:
+            logger.error("--warehouse-id required for collect mode")
+            logger.error("  Example: --warehouse-id abc123def456")
+            sys.exit(1)
+        
+        # Validate workspace URL format
+        if not args.admin_workspace.startswith('https://'):
+            logger.error(f"Invalid workspace URL: {args.admin_workspace}")
+            logger.error("  Must start with https:// (e.g., https://adb-123.azuredatabricks.net)")
+            sys.exit(1)
+    
     try:
         orchestrator = MetadataOrchestrator(config)
         
         if config['execution_mode'] == 'scan':
+            # Scan mode - just discover workspaces and metastores
             result = orchestrator.scan_workspaces(discovery_mode='account')
         else:
-            if not args.admin_workspace or not args.warehouse_id:
-                logger.error("--admin-workspace and --warehouse-id required for collect")
-                sys.exit(1)
-            
-            # Get collection settings from config
+            # Collect mode (collect or collect_dryrun)
             collection_cfg = config.get('collection', {})
+            
+            # Create volume_writer for incremental uploads if requested
+            volume_writer = None
+            if args.write_to_volume and not config.get('dry_run', False):
+                from databricks_metadata_tool.volume_writer import VolumeWriter
+                volume_config = config.get('volume', {})
+                
+                volume_writer = VolumeWriter(
+                    workspace_url=args.admin_workspace,
+                    catalog=volume_config.get('catalog', 'collection_catalog'),
+                    schema=volume_config.get('schema', 'collection_schema'),
+                    volume=volume_config.get('volume', 'collection_volume'),
+                    staging_folder=volume_config.get('staging_folder', 'staging')
+                )
+            elif args.write_to_volume and config.get('dry_run', False):
+                logger.info("[DRY RUN] Volume upload skipped")
             
             result = orchestrator.collect_from_admin(
                 args.admin_workspace,
@@ -102,31 +147,9 @@ Examples:
                 cluster_id=args.cluster_id,
                 size_threshold=collection_cfg.get('size_threshold', 200),
                 dry_run=config.get('dry_run', False),
-                only_catalogs=args.only_catalogs or collection_cfg.get('only_catalogs')
+                only_catalogs=args.only_catalogs or collection_cfg.get('only_catalogs'),
+                volume_writer=volume_writer
             )
-        
-        # Upload to volume if requested (skip in dry-run mode)
-        if args.write_to_volume and args.admin_workspace and not config.get('dry_run', False):
-            from databricks_metadata_tool.volume_writer import VolumeWriter
-            
-            # Get volume settings from config
-            volume_config = config.get('volume', {})
-            output_dir = config['output'].get('directory', './outputs')
-            
-            logger.info("Uploading to Unity Catalog volume...")
-            
-            volume_writer = VolumeWriter(
-                workspace_url=args.admin_workspace,
-                catalog=volume_config.get('catalog', 'collection_catalog'),
-                schema=volume_config.get('schema', 'collection_schema'),
-                volume=volume_config.get('volume', 'collection_volume'),
-                staging_folder=volume_config.get('staging_folder', 'staging')
-            )
-            
-            upload_result = volume_writer.upload_files(output_dir)
-            logger.info(f"Files uploaded to: {upload_result['volume_path']}")
-        elif args.write_to_volume and config.get('dry_run', False):
-            logger.info("[DRY RUN] Volume upload skipped")
         
         if result.errors:
             logger.warning(f"Completed with {len(result.errors)} error(s)")

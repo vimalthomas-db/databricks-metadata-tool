@@ -382,10 +382,9 @@ class CatalogCollector:
                         size_threshold: int = 200, dry_run_sizes: bool = False,
                         skip_tier2_fallback: bool = False) -> List[TableModel]:
         """
-        List all tables with smart tiered size collection.
+        List all tables with tiered size collection.
         
-        Tier 1: Try bulk system tables (fastest)
-        Tier 2: If < threshold tables, use parallel SQL warehouse queries
+        Tier 2: If < threshold tables, use parallel SQL warehouse DESCRIBE DETAIL
         Tier 3: If >= threshold tables, use Spark job (requires cluster_id)
         
         Args:
@@ -410,28 +409,14 @@ class CatalogCollector:
                 if len(schemas) < original_count:
                     logger.debug(f"    Excluded {original_count - len(schemas)} schema(s): {', '.join(self.exclude_schemas)}")
             
-            size_map = {}
-            bulk_success = False
-            if warehouse_id and self.catalog.catalog_name not in ['system', 'samples']:
-                if dry_run_sizes:
-                    logger.info(f"    [DRY RUN] Tier 1 (bulk) - skipped")
-                else:
-                    size_map = self._get_table_sizes_bulk(warehouse_id)
-                    bulk_success = len(size_map) > 0
-            
-            # Collect all tables
+            # Collect all tables from schemas
             for schema in schemas:
                 try:
-                    tables = self._list_tables_in_schema(schema.schema_name, warehouse_id, size_map if bulk_success else {})
+                    tables = self._list_tables_in_schema(schema.schema_name, warehouse_id, {})
                     all_tables.extend(tables)
                 except Exception as e:
                     logger.warning(f"Error listing tables in schema {schema.schema_name}: {str(e)}")
                     continue
-            
-            # If bulk succeeded, we're done - sizes already populated
-            if bulk_success:
-                logger.info(f"    Tier 1 (bulk): Got sizes for {len(size_map)} tables")
-                return all_tables
             
             # Count tables needing sizes
             tables_needing_size = [t for t in all_tables if t.is_delta and t.table_type != 'VIEW' and t.size_bytes is None]
@@ -545,57 +530,20 @@ class CatalogCollector:
     
     def _get_table_sizes_bulk(self, warehouse_id: str) -> dict:
         """
-        Get all table sizes in ONE query using system.information_schema.table_storage_info.
-        This is much faster than per-table DESCRIBE DETAIL queries.
+        Placeholder for bulk size collection.
+        
+        Note: Databricks does not have a system table with pre-computed table sizes.
+        The only reliable way to get table sizes is via DESCRIBE DETAIL (Tier 2/3).
+        
+        This method returns empty dict, causing fallback to Tier 2 or Tier 3.
         
         Returns:
-            dict: {full_table_name: {'size_bytes': int, 'num_files': int}}
+            dict: Empty dict (bulk collection not available)
         """
-        if not warehouse_id:
-            return {}
-        
-        logger.info(f"  Getting table sizes (bulk query) for catalog: {self.catalog.catalog_name}")
-        
-        try:
-            from databricks.sdk.service.sql import StatementState
-            
-            # Try system.information_schema.table_storage_info first (fastest)
-            catalog_name_escaped = escape_string_literal(self.catalog.catalog_name)
-            query = f"""
-            SELECT 
-                table_catalog,
-                table_schema,
-                table_name,
-                CAST(COALESCE(data_size_bytes, 0) AS BIGINT) as size_bytes,
-                CAST(COALESCE(num_files, 0) AS INT) as num_files
-            FROM system.information_schema.table_storage_info
-            WHERE table_catalog = '{catalog_name_escaped}'
-            """
-            
-            response = self.client.statement_execution.execute_statement(
-                warehouse_id=warehouse_id,
-                statement=query,
-                wait_timeout='50s'
-            )
-            
-            size_map = {}
-            if response.status.state == StatementState.SUCCEEDED and response.result and response.result.data_array:
-                for row in response.result.data_array:
-                    catalog, schema, table, size_bytes, num_files = row
-                    full_name = f"{catalog}.{schema}.{table}"
-                    size_map[full_name] = {
-                        'size_bytes': int(size_bytes) if size_bytes else None,
-                        'num_files': int(num_files) if num_files else None
-                    }
-                logger.info(f"    Retrieved sizes for {len(size_map)} tables via system tables")
-                return size_map
-            
-            logger.debug(f"    System table query returned no results, will use fallback")
-            return {}
-            
-        except Exception as e:
-            logger.debug(f"    Bulk size query failed: {str(e)[:80]}, will use fallback")
-            return {}
+        # Databricks Unity Catalog does not provide table sizes in information_schema.
+        # DESCRIBE DETAIL is the only way to get sizeInBytes.
+        # This method exists for future compatibility if Databricks adds bulk size access.
+        return {}
     
     def _collect_sizes_parallel(self, tables: List[TableModel], warehouse_id: str):
         """

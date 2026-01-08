@@ -492,7 +492,8 @@ class MetadataOrchestrator:
             logger.info(f"  Run Phase 2 with:")
             logger.info(f"    python main.py --collect --admin-workspace {ms.suggested_admin_workspace} --warehouse-id <your-warehouse-id>")
     
-    def _save_scan_results(self, scan_result: ScanResult, skip_workspaces: bool = False):
+    def _save_scan_results(self, scan_result: ScanResult, skip_workspaces: bool = False, 
+                           volume_writer = None):
         """Save Phase 1 scan results to CSV files"""
         import os
         
@@ -503,13 +504,20 @@ class MetadataOrchestrator:
         result_dict = scan_result.to_dict()
         
         # Export CSVs (skip_workspaces=True during collect, workspaces merged into collect_workspaces)
-        export_scan_to_csv(result_dict, output_dir, timestamp, skip_workspaces=skip_workspaces)
+        exported_files = export_scan_to_csv(result_dict, output_dir, timestamp, skip_workspaces=skip_workspaces)
         logger.info(f"\nScan results saved to: {output_dir}")
+        
+        # Incremental upload of scan files
+        if volume_writer:
+            for file_type, file_path in exported_files.items():
+                if file_path and os.path.exists(file_path):
+                    volume_writer.upload_file(file_path)
     
     def collect_from_admin(self, admin_workspace: str, warehouse_id: str, 
                           size_workers: int = 20, cluster_id: str = None,
                           size_threshold: int = 200, dry_run: bool = False,
-                          only_catalogs: List[str] = None) -> CollectionResult:
+                          only_catalogs: List[str] = None,
+                          volume_writer = None) -> CollectionResult:
         """
         Phase 2: Collect detailed metadata using specified admin workspace.
         
@@ -525,10 +533,17 @@ class MetadataOrchestrator:
             size_threshold: Table count threshold for Spark job (default: 200)
             dry_run: If True, show tier selection without collecting sizes or saving files
             only_catalogs: If provided, only collect tables from these catalogs (all other metadata collected normally)
+            volume_writer: VolumeWriter instance for incremental uploads (optional)
         """
         # DRY RUN: Minimal output - only tier calculations
         if dry_run:
             return self._dry_run_tier_analysis(admin_workspace, warehouse_id, cluster_id, size_threshold)
+        
+        # Store volume_writer for incremental uploads
+        self._volume_writer = volume_writer
+        if volume_writer:
+            logger.info("Incremental volume upload enabled")
+            volume_writer.ensure_volume_exists()  # Ensure volume exists upfront
         
         logger.info("=" * 80)
         logger.info("COLLECT: Full Metadata Collection")
@@ -541,7 +556,7 @@ class MetadataOrchestrator:
         # save_results=False: don't save here, we'll save manually with skip_workspaces=True
         scan_result = self.scan_workspaces(discovery_mode='account', save_results=False)
         # Save scan results but skip account_workspaces - workspaces merged into collect_workspaces
-        self._save_scan_results(scan_result, skip_workspaces=True)
+        self._save_scan_results(scan_result, skip_workspaces=True, volume_writer=volume_writer)
         
         logger.info("-" * 80)
         logger.info("Step 2: Metastore-level collection...")
@@ -620,6 +635,17 @@ class MetadataOrchestrator:
                 el.collected_at = collection_timestamp
             self.result.external_locations = external_locations
             logger.info(f"  - External Locations: {len(external_locations)}")
+            
+            # External location bindings (which workspaces can access each location)
+            ext_loc_names = [el.location_name for el in external_locations]
+            ext_loc_bindings = workspace_collector.list_external_location_bindings(ext_loc_names)
+            self.result.external_location_bindings = ext_loc_bindings
+            logger.info(f"  - External Location Bindings: {len(ext_loc_bindings)}")
+            
+            # Connections (Lakehouse Federation / federated sources)
+            connections = workspace_collector.list_connections()
+            self.result.connections = connections
+            logger.info(f"  - Connections (Federated Sources): {len(connections)}")
             
             # Catalog bindings (cross-workspace view)
             exclude_catalogs = self.filters.get('exclude_catalogs', [])
@@ -709,8 +735,11 @@ class MetadataOrchestrator:
                     )
                     catalog_schema_files.append(schema_file)
                     total_schemas_saved += len(schemas)
+                    # Incremental upload
+                    if volume_writer and schema_file:
+                        volume_writer.upload_file(schema_file)
                 
-                # Collect tables - use Tier 1/2 for immediate, queue Tier 3 for async
+                # Collect tables - use Tier 2 for immediate, queue Tier 3 for async
                 # Check if we should collect tables for this catalog (only_catalogs filter)
                 should_collect_tables = self.collection_config.get('collect_tables', True)
                 if only_catalogs and catalog.catalog_name not in only_catalogs:
@@ -720,7 +749,7 @@ class MetadataOrchestrator:
                 if should_collect_tables:
                     wh_id = warehouse_id if collect_sizes else None
                     
-                    # Collect tables (sizes collected via Tier 1/2, Tier 3 queued for async)
+                    # Collect tables (sizes collected via Tier 2, Tier 3 queued for async)
                     tables = catalog_collector.list_all_tables(
                         warehouse_id=wh_id,
                         cluster_id=None,  # Don't use sync Spark - we'll handle async
@@ -741,7 +770,7 @@ class MetadataOrchestrator:
                         tier3_catalogs.append((catalog, tables, tables_needing_size))
                         logger.info(f"    Queued for Spark: {len(tables_needing_size)} tables need sizes")
                     elif tables:
-                        # Save immediately (Tier 1/2 already collected sizes)
+                        # Save immediately (Tier 2 already collected sizes)
                         table_dicts = [t.to_dict() for t in tables]
                         file_path = export_catalog_tables_csv(
                             tables=table_dicts,
@@ -752,6 +781,9 @@ class MetadataOrchestrator:
                         )
                         catalog_table_files.append(file_path)
                         total_tables_saved += len(tables)
+                        # Incremental upload
+                        if volume_writer and file_path:
+                            volume_writer.upload_file(file_path)
                 
                 # Collect volumes
                 if self.collection_config.get('collect_volumes', True):
@@ -771,6 +803,9 @@ class MetadataOrchestrator:
                         )
                         catalog_volume_files.append(volume_file)
                         total_volumes_saved += len(volumes)
+                        # Incremental upload
+                        if volume_writer and volume_file:
+                            volume_writer.upload_file(volume_file)
                 
                 self.result.catalogs.append(catalog)
             
@@ -816,6 +851,9 @@ class MetadataOrchestrator:
                         )
                         catalog_table_files.append(file_path)
                         total_tables_saved += len(all_tables)
+                        # Incremental upload
+                        if volume_writer and file_path:
+                            volume_writer.upload_file(file_path)
             
             logger.info("-" * 80)
             logger.info(f"Saved: {total_schemas_saved} schemas, {total_tables_saved} tables, {total_volumes_saved} volumes")
@@ -936,19 +974,23 @@ class MetadataOrchestrator:
             print(f"Metastore: {workspace_collector.metastore_name}")
             print("-" * 70)
             
-            # Get catalogs
+            # Get catalogs and apply exclusions
             exclude_catalogs = self.filters.get('exclude_catalogs', [])
-            catalogs = workspace_collector.list_catalogs()
+            all_catalogs = workspace_collector.list_catalogs()
+            
+            # Filter out excluded and legacy catalogs
+            catalogs = [c for c in all_catalogs 
+                       if c.catalog_name not in exclude_catalogs and not c.is_legacy_hms]
+            
+            excluded_count = len(all_catalogs) - len(catalogs)
+            if excluded_count > 0:
+                print(f"\nExcluded {excluded_count} catalog(s): {', '.join(exclude_catalogs)}")
             
             print(f"\nAnalyzing {len(catalogs)} catalog(s)...\n")
             print(f"{'CATALOG':<30} {'TABLES':<10} {'TIER':<20} {'REASON'}")
             print("-" * 70)
             
             for catalog in catalogs:
-                if catalog.catalog_name in exclude_catalogs:
-                    continue
-                if catalog.is_legacy_hms:
-                    continue
                 
                 # Count tables in this catalog
                 catalog_collector = CatalogCollector(
@@ -992,10 +1034,9 @@ class MetadataOrchestrator:
             
             print("-" * 70)
             print("\nTier Legend:")
-            print("  Tier 1: system.information_schema (bulk query, fastest)")
-            print("  Tier 2: SQL Warehouse parallel DESCRIBE DETAIL")
-            print("  Tier 3: Spark cluster parallel collection")
-            print("\nNote: Tier 1 is always attempted first. Tier 2/3 are fallbacks.")
+            print("  Tier 2: SQL Warehouse parallel DESCRIBE DETAIL (< threshold tables)")
+            print("  Tier 3: Spark cluster parallel collection (>= threshold tables)")
+            print("\nNote: DESCRIBE DETAIL is the only way to get table sizes in Unity Catalog.")
             print("=" * 70)
             
         except Exception as e:
@@ -1592,8 +1633,15 @@ class MetadataOrchestrator:
                 logger.info(f"  Tables already saved to {len(self._catalog_table_files)} per-catalog files ({self._total_tables_saved} tables)")
             
             # Export collection results (scan data already exported via _save_scan_results)
-            export_collection_to_csv(result_dict, output_dir, timestamp)
+            exported_files = export_collection_to_csv(result_dict, output_dir, timestamp)
             logger.info(f"CSV files exported to: {output_dir}")
+            
+            # Incremental upload of collection files
+            if hasattr(self, '_volume_writer') and self._volume_writer:
+                import os
+                for file_type, file_path in exported_files.items():
+                    if file_path and os.path.exists(file_path):
+                        self._volume_writer.upload_file(file_path)
         
         except Exception as e:
             logger.error(f"Error exporting CSV: {str(e)}")

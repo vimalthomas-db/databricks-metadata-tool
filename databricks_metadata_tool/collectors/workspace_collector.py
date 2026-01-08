@@ -6,7 +6,10 @@ from typing import List, Optional
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.catalog import CatalogInfo
 
-from databricks_metadata_tool.models import Workspace, Catalog, ExternalLocation, CatalogBinding, Share, SharedObject, Repo, WorkspaceConfig
+from databricks_metadata_tool.models import (
+    Workspace, Catalog, ExternalLocation, ExternalLocationBinding, 
+    CatalogBinding, Share, SharedObject, Repo, WorkspaceConfig, Connection
+)
 from databricks_metadata_tool.utils import extract_storage_info
 
 logger = logging.getLogger('databricks_metadata_tool.workspace_collector')
@@ -316,6 +319,94 @@ class WorkspaceCollector:
         
         logger.info(f"Found {len(external_locations)} external location(s)")
         return external_locations
+    
+    def list_external_location_bindings(self, location_names: List[str] = None) -> List[ExternalLocationBinding]:
+        """
+        List workspace bindings for external locations.
+        
+        Args:
+            location_names: Optional list of location names to get bindings for.
+                          If None, gets bindings for all external locations.
+        """
+        logger.info(f"Listing external location bindings in workspace: {self.workspace.workspace_name}")
+        
+        bindings = []
+        
+        try:
+            # If no location names provided, get all external locations first
+            if location_names is None:
+                ext_locs = list(self.client.external_locations.list())
+                location_names = [loc.name for loc in ext_locs]
+            
+            for loc_name in location_names:
+                try:
+                    # Get bindings for this external location
+                    binding_response = self.client.workspace_bindings.get_bindings(
+                        securable_type='external_location',
+                        securable_name=loc_name
+                    )
+                    
+                    if binding_response and binding_response.bindings:
+                        for b in binding_response.bindings:
+                            binding = ExternalLocationBinding(
+                                location_name=loc_name,
+                                workspace_id=str(b.workspace_id) if b.workspace_id else '',
+                                binding_type=str(b.binding_type) if b.binding_type else 'BINDING_TYPE_READ_WRITE',
+                                metastore_id=getattr(self, 'metastore_id', None),
+                                metastore_name=getattr(self, 'metastore_name', None)
+                            )
+                            bindings.append(binding)
+                            logger.debug(f"  Binding: {loc_name} -> workspace {b.workspace_id}")
+                            
+                except Exception as e:
+                    logger.debug(f"  Could not get bindings for {loc_name}: {str(e)[:50]}")
+                    continue
+        
+        except Exception as e:
+            logger.warning(f"Error listing external location bindings: {str(e)}")
+        
+        logger.info(f"Found {len(bindings)} external location binding(s)")
+        return bindings
+    
+    def list_connections(self) -> List[Connection]:
+        """List federated source connections (Lakehouse Federation)."""
+        logger.info(f"Listing connections in workspace: {self.workspace.workspace_name}")
+        
+        connections = []
+        
+        try:
+            connection_list = list(self.client.connections.list())
+            
+            for conn in connection_list:
+                connection = Connection(
+                    connection_name=conn.name,
+                    connection_type=str(conn.connection_type) if conn.connection_type else 'UNKNOWN',
+                    host=conn.host if hasattr(conn, 'host') else None,
+                    port=conn.port if hasattr(conn, 'port') else None,
+                    owner=conn.owner if hasattr(conn, 'owner') else None,
+                    comment=conn.comment if hasattr(conn, 'comment') else None,
+                    read_only=conn.read_only if hasattr(conn, 'read_only') else False,
+                    created_at=conn.created_at if hasattr(conn, 'created_at') else None,
+                    created_by=conn.created_by if hasattr(conn, 'created_by') else None,
+                    updated_at=conn.updated_at if hasattr(conn, 'updated_at') else None,
+                    updated_by=conn.updated_by if hasattr(conn, 'updated_by') else None,
+                    workspace_id=self.workspace.workspace_id,
+                    workspace_name=self.workspace.workspace_name,
+                    metastore_id=getattr(self, 'metastore_id', None),
+                    metastore_name=getattr(self, 'metastore_name', None)
+                )
+                connections.append(connection)
+                logger.debug(f"  Found connection: {conn.name} ({connection.connection_type})")
+        
+        except Exception as e:
+            # Connections API may not be available in all workspaces
+            if 'FEATURE_DISABLED' in str(e) or 'not enabled' in str(e).lower():
+                logger.debug(f"Connections/Lakehouse Federation not enabled in this workspace")
+            else:
+                logger.warning(f"Error listing connections: {str(e)}")
+        
+        logger.info(f"Found {len(connections)} connection(s)")
+        return connections
     
     def list_shares(self) -> List[Share]:
         logger.info(f"Listing Delta shares in workspace: {self.workspace.workspace_name}")

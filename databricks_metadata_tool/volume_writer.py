@@ -78,12 +78,46 @@ class VolumeWriter:
         
         return volume_full_name
     
+    def get_volume_path(self) -> str:
+        """Get the full volume path for uploads."""
+        return f"/Volumes/{self.catalog}/{self.schema}/{self.volume_name}/{self.staging_folder}"
+    
+    def upload_file(self, file_path: str) -> bool:
+        """
+        Upload a single file to the volume.
+        
+        Args:
+            file_path: Local path to the file to upload
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            file_path = Path(file_path)
+            if not file_path.exists():
+                logger.warning(f"File not found: {file_path}")
+                return False
+            
+            volume_path = self.get_volume_path()
+            remote_path = f"{volume_path}/{file_path.name}"
+            
+            with open(file_path, 'rb') as f:
+                content = f.read()
+            
+            self.client.files.upload(remote_path, content, overwrite=True)
+            logger.info(f"  ↑ Uploaded: {file_path.name}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"  ✗ Upload failed {file_path.name}: {str(e)[:60]}")
+            return False
+    
     def upload_files(self, output_dir: str, timestamp: str = None) -> dict:
         """Upload all CSV files from output_dir to the volume."""
         self.ensure_volume_exists()
         
         # Volume path
-        volume_path = f"/Volumes/{self.catalog}/{self.schema}/{self.volume_name}/{self.staging_folder}"
+        volume_path = self.get_volume_path()
         
         uploaded_files = []
         failed_files = []

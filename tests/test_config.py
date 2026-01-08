@@ -10,9 +10,12 @@ import yaml
 class TestConfigLoading:
     """Test configuration file loading."""
     
-    def test_load_valid_config(self, temp_output_dir):
+    def test_load_valid_config(self, temp_output_dir, monkeypatch):
         """Test loading a valid config file."""
         from databricks_metadata_tool.utils import load_config
+        
+        # Clear env vars so config file values are used
+        monkeypatch.delenv('DATABRICKS_ACCOUNT_ID', raising=False)
         
         config_content = """
 databricks:

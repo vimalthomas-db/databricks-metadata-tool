@@ -335,6 +335,43 @@ class WorkspaceConfig:
 
 
 @dataclass
+class ExternalLocationBinding:
+    """Workspace binding for an external location."""
+    location_name: str
+    workspace_id: str
+    workspace_name: Optional[str] = None
+    binding_type: str = "BINDING_TYPE_READ_WRITE"  # READ_ONLY or READ_WRITE
+    metastore_id: Optional[str] = None
+    metastore_name: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Connection:
+    """Federated source connection (Lakehouse Federation)."""
+    connection_name: str
+    connection_type: str  # MYSQL, POSTGRESQL, SNOWFLAKE, REDSHIFT, SQLDW, SQLSERVER, DATABRICKS
+    host: Optional[str] = None
+    port: Optional[int] = None
+    owner: Optional[str] = None
+    comment: Optional[str] = None
+    read_only: bool = False
+    created_at: Optional[int] = None
+    created_by: Optional[str] = None
+    updated_at: Optional[int] = None
+    updated_by: Optional[str] = None
+    workspace_id: Optional[str] = None
+    workspace_name: Optional[str] = None
+    metastore_id: Optional[str] = None
+    metastore_name: Optional[str] = None
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class CollectionResult:
     subscription_id: str
     collection_timestamp: str
@@ -344,8 +381,10 @@ class CollectionResult:
     tables: List[Table] = field(default_factory=list)
     volumes: List[Volume] = field(default_factory=list)
     external_locations: List['ExternalLocation'] = field(default_factory=list)
+    external_location_bindings: List['ExternalLocationBinding'] = field(default_factory=list)
     catalog_bindings: List['CatalogBinding'] = field(default_factory=list)
     shares: List['Share'] = field(default_factory=list)
+    connections: List['Connection'] = field(default_factory=list)
     repos: List['Repo'] = field(default_factory=list)
     workspace_configs: List['WorkspaceConfig'] = field(default_factory=list)
     errors: List[Dict[str, Any]] = field(default_factory=list)
@@ -361,8 +400,10 @@ class CollectionResult:
                 'tables_count': len(self.tables),
                 'volumes_count': len(self.volumes),
                 'external_locations_count': len(self.external_locations),
+                'external_location_bindings_count': len(self.external_location_bindings),
                 'catalog_bindings_count': len(self.catalog_bindings),
                 'shares_count': len(self.shares),
+                'connections_count': len(self.connections),
                 'repos_count': len(self.repos),
                 'workspace_configs_count': len(self.workspace_configs),
                 'errors_count': len(self.errors)

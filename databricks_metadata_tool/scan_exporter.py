@@ -486,7 +486,66 @@ def export_collection_to_csv(collection_data: Dict[str, Any], output_dir: str, t
     exported_files['catalog_bindings'] = bindings_file
     logger.info(f"  Exported {len(collection_data.get('catalog_bindings', []))} catalog bindings")
     
-    # 7. Delta Shares CSV
+    # 7. External Location Bindings CSV
+    ext_loc_bindings_file = os.path.join(output_dir, f'collect_external_location_bindings_{timestamp}.csv')
+    with open(ext_loc_bindings_file, 'w', newline='') as f:
+        writer = csv.writer(f, delimiter='|', quoting=csv.QUOTE_MINIMAL)
+        writer.writerow([
+            'location_name', 'workspace_id', 'workspace_name', 'binding_type',
+            'metastore_id', 'metastore_name',
+            'collection_timestamp'
+        ])
+        
+        for binding in collection_data.get('external_location_bindings', []):
+            writer.writerow([
+                binding.get('location_name', ''),
+                binding.get('workspace_id', ''),
+                binding.get('workspace_name', ''),
+                binding.get('binding_type', ''),
+                binding.get('metastore_id', ''),
+                binding.get('metastore_name', ''),
+                collection_ts
+            ])
+    
+    exported_files['external_location_bindings'] = ext_loc_bindings_file
+    logger.info(f"  Exported {len(collection_data.get('external_location_bindings', []))} external location bindings")
+    
+    # 8. Connections (Federated Sources) CSV
+    connections_file = os.path.join(output_dir, f'collect_connections_{timestamp}.csv')
+    with open(connections_file, 'w', newline='') as f:
+        writer = csv.writer(f, delimiter='|', quoting=csv.QUOTE_MINIMAL)
+        writer.writerow([
+            'connection_name', 'connection_type', 'host', 'port',
+            'owner', 'comment', 'read_only',
+            'metastore_id', 'metastore_name', 'workspace_id', 'workspace_name',
+            'created_at', 'created_by', 'updated_at', 'updated_by',
+            'collection_timestamp'
+        ])
+        
+        for conn in collection_data.get('connections', []):
+            writer.writerow([
+                conn.get('connection_name', ''),
+                conn.get('connection_type', ''),
+                conn.get('host', ''),
+                conn.get('port', ''),
+                conn.get('owner', ''),
+                (conn.get('comment', '') or '').replace('\n', ' '),
+                conn.get('read_only', False),
+                conn.get('metastore_id', ''),
+                conn.get('metastore_name', ''),
+                conn.get('workspace_id', ''),
+                conn.get('workspace_name', ''),
+                conn.get('created_at', ''),
+                conn.get('created_by', ''),
+                conn.get('updated_at', ''),
+                conn.get('updated_by', ''),
+                collection_ts
+            ])
+    
+    exported_files['connections'] = connections_file
+    logger.info(f"  Exported {len(collection_data.get('connections', []))} connections")
+    
+    # 9. Delta Shares CSV
     shares_file = os.path.join(output_dir, f'collect_delta_shares_{timestamp}.csv')
     with open(shares_file, 'w', newline='') as f:
         writer = csv.writer(f, delimiter='|', quoting=csv.QUOTE_MINIMAL)
